@@ -1,0 +1,165 @@
+---
+title: "Reproducible Research: Peer Assessment 2"
+output: 
+  html_document:
+    keep_md: true
+---
+
+## Synopsis
+
+Analysis of the greatest weather threats to public health and economy of the
+United States.
+
+## Environment information
+
+### Used libraries
+
+```{r echo=TRUE,message=FALSE}
+library(dplyr)
+library(R.oo)
+library(ggplot2)
+library(reshape2)
+```
+
+### Session information
+
+This analysis war performed using the software listed below.
+
+```{r echo=TRUE}
+sessionInfo()
+```
+
+
+## Data Processing
+
+Data may be obtained from the [National Weather Service](http://www.weather.gov/)
+[Storm Data Documentation](http://www.ncdc.noaa.gov/stormevents/) although data 
+data used for the current analysis was provided from:
+
+* [StormData.csv.bz2](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2)
+
+There is also some documentation of the database available. Here you will find how some of the variables are constructed/defined.
+
+* National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
+* National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)
+
+### Loading and preprocessing the data
+
+Raw data is extrated from it's [original distribution file](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
+
+```{r echo=TRUE, cache=TRUE}
+raw_data <- read.csv(bzfile("StormData.csv.bz2"), na.strings="", stringsAsFactors=FALSE)
+```
+
+The data consists of `r dim(raw_data)[1]` rows of `r dim(raw_data)[2]`
+variables.
+
+First show some exploratory information about the variables used in the analysis.
+
+```{r echo=TRUE}
+# Summary of event types and count per year
+yeve <- raw_data %>%
+    mutate(year=as.integer(format(as.Date(raw_data$BGN_DATE,"%m/%d/%Y"),"%Y"))) %>%
+    group_by(year,EVTYPE) %>%
+    summarise(cnt=n())  %>% summarise(count=sum(cnt),n=n())
+par(mfrow = c(1,2))
+plot(n ~ year, yeve, main="Different event types reported by year")
+plot(count ~ year, yeve, main="Reported events per year")
+```
+
+Events in the database start in the year `r min(yeve$year)` to `r max(yeve$year)`.
+
+Before 1993 only few types of events were reported, also the quantity of events 
+reported is much higher after 1993.
+
+The event type (EVTYPE) has non consistent values, a simple aproach to clean
+this data is to clean extra whitespace and make it all uppercase.
+
+```{r echo=TRUE}
+raw_evType_summary = raw_data %>% select(EVTYPE) %>% group_by(EVTYPE) %>% summarise()
+clean_evType = data.frame(EVTYPE=as.factor(toupper(trim(raw_data$EVTYPE))))
+clean_evType_summary = clean_evType %>% select(EVTYPE) %>% group_by(EVTYPE) %>% summarise()
+```
+
+This simple cleanup of the event type colapsed the numbert of different events
+from `r dim(raw_evType_summary)[1]` to `r dim(clean_evType_summary)[1]`.
+
+Property and crop damage are expresed as numbers with magnitude factors, this
+factors should be K, M, B standing for thousands, millions and billions
+respectively, but the file has errors shown in the folowing summary:
+
+```{r echo=TRUE}
+summary(as.factor(raw_data$PROPDMGEXP))
+```
+
+It will be assumed that missing factors account for K, that upper and lower case
+factors of the same letter have the same value and, that all extrange factor
+names (which have very little samples) are thousands. The function used to do
+this conversion is shown below.
+
+```{r echo=TRUE}
+parse_exp <- function(e) {
+  if (is.na(e)) 1e3
+  else if (tolower(e) == "k") 1e3
+  else if (tolower(e) == "m") 1e6
+  else if (tolower(e) == "b") 1e9
+  else 1e3
+}
+```
+
+Clean up and filter the data, just keep the rows and variables needed for
+the analysis.
+
+```{r echo=TRUE, cache=TRUE}
+data <- data.frame(
+  date = as.Date(raw_data$BGN_DATE,"%m/%d/%Y"),
+  evType = as.factor(toupper(trim(raw_data$EVTYPE))),
+  fatalities = as.integer(raw_data$FATALITIES),
+  injuries = as.integer(raw_data$INJURIES),
+  property = raw_data$PROPDMG * sapply(raw_data$PROPDMGEXP, parse_exp),
+  crop = raw_data$CROPDMG * sapply(raw_data$CROPDMGEXP, parse_exp)
+  )
+```
+
+To avoid bias, only years after 1993 will be considered for the analysis.
+
+```{r echo=TRUE, cache=TRUE}
+data <- filter(data, format(date,"%Y") > "1993")
+```
+
+Compute top causes of health and property damage.
+
+```{r echo=TRUE}
+sum_by_evType <- data %>% group_by(evType) %>% 
+    summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(property),crop=sum(crop))
+
+top_num <- 20
+top_health <- sum_by_evType %>%  top_n(top_num,fatalities)
+top_property <- sum_by_evType %>% top_n(top_num,property+crop)
+```
+
+
+## Results
+
+Top health threads
+
+```{r echo=TRUE}
+f <- top_health %>% select(evType,fatalities,injuries)
+f$evType <- reorder(f$evType, f$injuries+f$fatalities)
+f <- melt(f,id.vars = "evType")
+ggplot(data=f, aes(evType, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Fatalities count') +
+    ggtitle("Top 20 Causes of health thread")
+```
+
+Top property threads
+
+```{r echo=TRUE}
+f <- top_property %>% select(evType,property,crop)
+f$evType <- reorder(f$evType, f$property+f$crop)
+f <- melt(f,id.vars = "evType")
+f$value <- f$value / 1e9
+ggplot(data=f, aes(evType, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Looses in billions of USD') +
+    ggtitle("Top 20 Causes of property damage")
+```
