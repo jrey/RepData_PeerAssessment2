@@ -1,5 +1,5 @@
 ---
-title: "Reproducible Research: Peer Assessment 2"
+title: "Worst natural disaster threats in US"
 output: 
   html_document:
     keep_md: true
@@ -7,32 +7,12 @@ output:
 
 ## Synopsis
 
-Analysis of the greatest weather threats to public health and economy of the
-United States.
-
-## Environment information
-
-### Used libraries
-
-```{r echo=TRUE,message=FALSE}
-library(dplyr)
-library(R.oo)
-library(ggplot2)
-library(reshape2)
-```
-
-### Session information
-
-This analysis war performed using the software listed below.
-
-```{r echo=TRUE}
-sessionInfo()
-```
+In this report we aim to analise the natural disasters that pose the greatest threat to public health and economy of the United States. We will use the data from the [National Weather Service](http://www.weather.gov/), and will use the number of casualities and injured people to show the public health threat of the event, while using the property and crop looses in USD as a measure of the threat to the economy. If you need only an executive review of this document skip to the results section.
 
 
 ## Data Processing
 
-Data may be obtained from the [National Weather Service](http://www.weather.gov/)
+Data may be obtained from the [National Weather Service](http://www.weather.gov/) and
 [Storm Data Documentation](http://www.ncdc.noaa.gov/stormevents/) although data 
 data used for the current analysis was provided from:
 
@@ -43,9 +23,27 @@ There is also some documentation of the database available. Here you will find h
 * National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
 * National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)
 
+### Software Environment information
+
+This report was prepared using the following software environment.
+
+```{r echo=TRUE}
+sessionInfo()
+```
+
+### Used libraries
+
+```{r echo=TRUE,message=FALSE}
+library(dplyr)
+library(R.oo)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+```
+
 ### Loading and preprocessing the data
 
-Raw data is extrated from it's [original distribution file](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
+Raw data is extracted from it's [original distribution file](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
 
 ```{r echo=TRUE, cache=TRUE}
 raw_data <- read.csv(bzfile("StormData.csv.bz2"), na.strings="", stringsAsFactors=FALSE)
@@ -54,112 +52,234 @@ raw_data <- read.csv(bzfile("StormData.csv.bz2"), na.strings="", stringsAsFactor
 The data consists of `r dim(raw_data)[1]` rows of `r dim(raw_data)[2]`
 variables.
 
-First show some exploratory information about the variables used in the analysis.
+Since we will be using years heavily throught the analysis, we'll add parsed
+date and year variables.
 
-```{r echo=TRUE}
-# Summary of event types and count per year
-yeve <- raw_data %>%
-    mutate(year=as.integer(format(as.Date(raw_data$BGN_DATE,"%m/%d/%Y"),"%Y"))) %>%
-    group_by(year,EVTYPE) %>%
-    summarise(cnt=n())  %>% summarise(count=sum(cnt),n=n())
-par(mfrow = c(1,2))
-plot(n ~ year, yeve, main="Different event types reported by year")
-plot(count ~ year, yeve, main="Reported events per year")
+```{r echo=TRUE, cache=TRUE}
+dated_data <- mutate(raw_data, date=as.Date(raw_data$BGN_DATE,"%m/%d/%Y")) %>%
+  mutate(year=as.integer(format(date, "%Y")))
 ```
 
-Events in the database start in the year `r min(yeve$year)` to `r max(yeve$year)`.
+### Exploratory information
 
-Before 1993 only few types of events were reported, also the quantity of events 
-reported is much higher after 1993.
+The following graphs show the behavior of the types of events and event count for each year.
 
-The event type (EVTYPE) has non consistent values, a simple aproach to clean
-this data is to clean extra whitespace and make it all uppercase.
-
-```{r echo=TRUE}
-raw_evType_summary = raw_data %>% select(EVTYPE) %>% group_by(EVTYPE) %>% summarise()
-clean_evType = data.frame(EVTYPE=as.factor(toupper(trim(raw_data$EVTYPE))))
-clean_evType_summary = clean_evType %>% select(EVTYPE) %>% group_by(EVTYPE) %>% summarise()
+```{r echo=TRUE,fig.height=8, fig.width=8}
+y_ev <- dated_data %>% group_by(year, EVTYPE) %>% summarise(count=n()) %>%
+  summarise(count=sum(count),types=n())
+par(mfrow = c(2,1))
+plot(count ~ year, y_ev, main="Event count per year")
+plot(types ~ year, y_ev, main="Types of events by year")
 ```
 
-This simple cleanup of the event type colapsed the numbert of different events
-from `r dim(raw_evType_summary)[1]` to `r dim(clean_evType_summary)[1]`.
+This shows that the count of event reports have been grown since 1950,
+but after 1992 the grow rate is accelerated.
+
+Also during 1993 the number of event types reported skyrocketed and then steadly
+decreased until 2007 when it finally stabilized in 46 event types.
+
+Before 1993 only the following types of events were reported:
+
+```{r echo=TRUE,results='asis'}
+t <- dated_data %>% filter(year < 1993) %>% group_by(EVTYPE) %>% summarise()
+knitr::kable( t, "Types of events reported before 1993", format="markdown" )
+```
+
+To avoid bias toward this type of events we'll delete data from years before 1993
+and get a usable dataset.
+
+```{r echo=TRUE}
+use_data <- dated_data %>% filter(year >= 1993)
+deleted_records <- dim(raw_data)[1] - dim(use_data)[1]
+deleted_percent <- deleted_records / dim(raw_data)[1]
+```
+
+This deleted `r deleted_records` records which is about `r sprintf("%.2f%%", deleted_percent*100)`
+of the total number of raw records in the database
+
+Field EVTYPE has evident consistency issues, there are repeated labels with
+different case ana some misspellings illustrated by the following sample:
+
+```{r echo=TRUE}
+raw_ev <- use_data %>% group_by(EVTYPE) %>% summarise(count=n())
+raw_ev[c(grep("surf ad",raw_ev$EVTYPE,ignore.case = TRUE),grep("w.*y mix",raw_ev$EVTYPE,ignore.case = TRUE)), ]
+```
+
+Since the most obvious differences are whitespace and uppercase/lowercase issues
+we'll normalize the data trimming extra whitespace and converting to all uppercase.
+
+```{r echo=TRUE,cache=TRUE}
+# Get a cleaner event type by trimming and uppercasing
+uc_ev <- data.frame(EVTYPE=as.factor(toupper(trim(raw_data$EVTYPE))))
+uc_ev_sum <- uc_ev %>% group_by(EVTYPE) %>% summarise(count=n())
+```
+
+This reduced the number of different events from `r dim(raw_ev)[1]` to
+`r dim(uc_ev_sum)[1]`.
+
+Further manual adjustments were done by clustering similar events together by
+assigning the same name, we also delete rare and nonsense events.
+
+```{r echo=TRUE}
+translator <- function (df) {
+  misspellings = c(
+    "FLOOODING", "FLOOD",
+    "THUNDEERSTORM|THUNDEERSTORM|THUDERSTORM", "TSTM",
+    "THUNDERSTORM", "TSTM",
+    "TUNDERSTORM", "TSTM"
+  )
+  
+  clusters <- c(
+    "^COASTAL +FL", "COASTAL FLOOD",
+    "^DRY MI(CR|RC)OBURST", "DRY MICROBURST",
+    "EXTREME .*(COLD|CHILL)", "EXTREME COLD/WIND CHILL",
+    "^FLASH FLOOD", "FLASH FLOOD",
+    "^FLOOD", "FLOOD",
+    "^(FROST|FREEZ)", "FROST/FREEZE",
+    "^FUNNEL", "FUNNEL CLOUD",
+    "^HAIL", "HAIL",
+    "^HEAVY RAIN", "HEAVY RAIN",
+    "^HEAVY SHOWER", "HEAVY RAIN",
+    "^HEAVY PRECIP", "HEAVY RAIN",
+    "^HEAVY .* SNOW", "HEAVY SNOW",
+    "^HIGH WIND", "HIGH WIND",
+    "^HURRICANE", "HURRICANE",
+    "^IC(E|Y )", "ICE STORM",
+    "^LAKE FLOOD", "LAKESHORE FLOOD",
+    "^LAKE EFFECT SNOW", "LAKE-EFFECT SNOW",
+    "^LIGHTNING", "LIGHTNING",
+    "^MARINE .* WIND", "MARINE TSTM WIND",
+    "^TORNADO", "TORNADO",
+    "^TSTM WIND", "TSTM WIND",
+    "^TROPICAL STORM", "TROPICAL STORM",
+    "^WATERSPOUT", "WATERSPOUT",
+    "WILD.*FIRE", "WILDFIRE",
+    "^WINTER STORM", "WINTER STORM",
+    "^WINTER WEATHER", "WINTER WEATHER",
+    "WIN.*MIX", "WINTER WEATHER",
+    "SURF", "HIGH SURF",
+    "^RECORD LOW RAINFALL", "?",
+    "(HEAVY|EXC|TORR).*RAIN", "HEAVY RAIN",
+    "RAIN.*(HEAVY|EXC|TORR)", "HEAVY RAIN",
+    "^SUMMARY", "?"
+  )
+  
+  df <- df %>% mutate(label=EVTYPE);
+  ms <- matrix(data=misspellings, ncol=2, byrow=TRUE)
+  ms_num = dim(ms)[1]
+  for (i in 1:ms_num) {
+    df$label = gsub(ms[i,1],ms[i,2],df$label)
+  }
+  cs = matrix(data=clusters, ncol=2, byrow=TRUE)
+  cs_num = dim(cs)[1] - 1
+  for (row in 1:cs_num) {
+    df$label[grep(cs[row,1], df$label)] = cs[row,2]
+  }
+  
+  # Make label a factor
+  df$label <- as.factor(df$label)
+  
+  # Delete nonsense events
+  df <- df %>% filter(label != "?")
+  
+  # Delete rare event types
+  df %>% group_by(label) %>% summarise(n=sum(count)) %>% filter(n > 10) %>%
+    inner_join(df,by = "label") %>% select(label, EVTYPE)
+}
+
+rosetta <- translator(uc_ev_sum)
+```
+
+Manual adjustment reduced the number of different events from `r length(levels(rosetta$EVTYPE))`
+to `r length(levels(rosetta$label))`.
+
+Then we compute a clean event dataset with unified lables and rare event types deleted.
+
+```{r echo=TRUE}
+clean_data <- inner_join(rosetta, use_data, by="EVTYPE")
+deleted_records <- dim(use_data)[1] - dim(clean_data)[1]
+deleted_percent <- deleted_records / dim(use_data)[1]
+```
+
+This deleted `r deleted_records` records which is only about `r sprintf("%.2f%%", deleted_percent*100)`
+of the total number of usable dataset records in the database.
 
 Property and crop damage are expresed as numbers with magnitude factors, this
 factors should be K, M, B standing for thousands, millions and billions
-respectively, but the file has errors shown in the folowing summary:
+respectively, but the file has errors shown in the following summary:
 
-```{r echo=TRUE}
-summary(as.factor(raw_data$PROPDMGEXP))
+```{r echo=TRUE,results='asis'}
+t <- summary(as.factor(clean_data$PROPDMGEXP))
+knitr::kable(t, caption="Summary of exponents", format="markdown",
+             col.names=c("Count of Occurrences"))
 ```
 
 It will be assumed that missing factors account for K, that upper and lower case
 factors of the same letter have the same value and, that all extrange factor
-names (which have very little samples) are thousands. The function used to do
+names (which are very rare) are thousands. The function used to do
 this conversion is shown below.
 
 ```{r echo=TRUE}
-parse_exp <- function(e) {
-  if (is.na(e)) 1e3
-  else if (tolower(e) == "k") 1e3
-  else if (tolower(e) == "m") 1e6
-  else if (tolower(e) == "b") 1e9
-  else 1e3
+parse_exp <- function(v) {
+  parse_one <- function(e) {
+    if (is.na(e)) 1e3
+    else if (tolower(e) == "k") 1e3
+    else if (tolower(e) == "m") 1e6
+    else if (tolower(e) == "b") 1e9
+    else 1e3
+  }
+  sapply(v, parse_one)
 }
 ```
 
-Clean up and filter the data, just keep the rows and variables needed for
-the analysis.
+Then we compute the working dataset.
 
 ```{r echo=TRUE, cache=TRUE}
-data <- data.frame(
-  date = as.Date(raw_data$BGN_DATE,"%m/%d/%Y"),
-  evType = as.factor(toupper(trim(raw_data$EVTYPE))),
-  fatalities = as.integer(raw_data$FATALITIES),
-  injuries = as.integer(raw_data$INJURIES),
-  property = raw_data$PROPDMG * sapply(raw_data$PROPDMGEXP, parse_exp),
-  crop = raw_data$CROPDMG * sapply(raw_data$CROPDMGEXP, parse_exp)
-  )
-```
-
-To avoid bias, only years after 1993 will be considered for the analysis.
-
-```{r echo=TRUE, cache=TRUE}
-data <- filter(data, format(date,"%Y") > "1993")
+data <- clean_data %>% 
+  rename(fatalities=FATALITIES, injuries=INJURIES, evtype=label) %>%
+  mutate(propdmg = PROPDMG * parse_exp(PROPDMGEXP)) %>%
+  mutate(cropdmg = CROPDMG * parse_exp(CROPDMGEXP)) %>%
+  select(year, evtype, fatalities, injuries, propdmg, cropdmg)
 ```
 
 Compute top causes of health and property damage.
 
 ```{r echo=TRUE}
-sum_by_evType <- data %>% group_by(evType) %>% 
-    summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(property),crop=sum(crop))
+sum_by_evType <- data %>% group_by(evtype) %>% 
+    summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(propdmg),crop=sum(cropdmg))
 
 top_num <- 20
 top_health <- sum_by_evType %>%  top_n(top_num,fatalities)
-top_property <- sum_by_evType %>% top_n(top_num,property+crop)
+top_econom <- sum_by_evType %>% top_n(top_num,property+crop)
+```
+
+```{r echo=TRUE}
+health_bars <- function () {
+  f <- top_health %>% select(evtype,fatalities,injuries)
+  f$evtype <- reorder(f$evtype, f$injuries+f$fatalities)
+  f <- melt(f,id.vars = "evtype")
+  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Number of casualties') +
+    ggtitle("Top 20 Causes of health thread")  
+}
+
+econom_bars <- function () {
+  f <- top_econom %>% select(evtype,property,crop)
+  f$evtype <- reorder(f$evtype, f$property+f$crop)
+  f <- melt(f,id.vars = "evtype")
+  f$value <- f$value / 1e9
+  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Looses in billions of USD') +
+    ggtitle("Top 20 Causes of economic damage")
+}
 ```
 
 
 ## Results
 
-Top health threads
+Top threats
 
-```{r echo=TRUE}
-f <- top_health %>% select(evType,fatalities,injuries)
-f$evType <- reorder(f$evType, f$injuries+f$fatalities)
-f <- melt(f,id.vars = "evType")
-ggplot(data=f, aes(evType, value)) + geom_bar(stat="identity",aes(fill=variable)) +
-    coord_flip() + xlab('')+ ylab('Fatalities count') +
-    ggtitle("Top 20 Causes of health thread")
+```{r echo=TRUE, fig.height=10, fig.width=8}
+grid.arrange(health_bars(), econom_bars(), ncol=1)
 ```
 
-Top property threads
-
-```{r echo=TRUE}
-f <- top_property %>% select(evType,property,crop)
-f$evType <- reorder(f$evType, f$property+f$crop)
-f <- melt(f,id.vars = "evType")
-f$value <- f$value / 1e9
-ggplot(data=f, aes(evType, value)) + geom_bar(stat="identity",aes(fill=variable)) +
-    coord_flip() + xlab('')+ ylab('Looses in billions of USD') +
-    ggtitle("Top 20 Causes of property damage")
-```
