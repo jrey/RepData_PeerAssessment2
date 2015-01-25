@@ -1,8 +1,9 @@
 ---
 title: "Worst natural disaster threats in US"
-output: 
+output:
+  pdf_document: default
   html_document:
-    keep_md: true
+    keep_md: yes
 ---
 
 ## Synopsis
@@ -78,6 +79,10 @@ but after 1992 the grow rate is accelerated.
 Also during 1993 the number of event types reported skyrocketed and then steadly
 decreased until 2007 when it finally stabilized in 46 event types.
 
+### Data cleanup
+
+#### Making a usable dataset
+
 Before 1993 only the following types of events were reported:
 
 ```{r echo=TRUE,results='asis'}
@@ -90,23 +95,31 @@ and get a usable dataset.
 
 ```{r echo=TRUE}
 use_data <- dated_data %>% filter(year >= 1993)
+```
+
+```{r echo=FALSE}
+percent <- function (p) { sprintf("%.2f%%", 100*(p)) }
 deleted_records <- dim(raw_data)[1] - dim(use_data)[1]
 deleted_percent <- deleted_records / dim(raw_data)[1]
 ```
 
-This deleted `r deleted_records` records which is about `r sprintf("%.2f%%", deleted_percent*100)`
+This deleted `r deleted_records` records which is about `r percent(deleted_percent)`
 of the total number of raw records in the database
 
-Field EVTYPE has evident consistency issues, there are repeated labels with
-different case ana some misspellings illustrated by the following sample:
+#### Event cleanup
+
+Field EVTYPE has evident consistency issues, same labels appear multiple times
+due to extra whitespace and different capitalization, a sample of this is shown.
+
 
 ```{r echo=TRUE}
 raw_ev <- use_data %>% group_by(EVTYPE) %>% summarise(count=n())
 raw_ev[c(grep("surf ad",raw_ev$EVTYPE,ignore.case = TRUE),grep("w.*y mix",raw_ev$EVTYPE,ignore.case = TRUE)), ]
 ```
 
-Since the most obvious differences are whitespace and uppercase/lowercase issues
-we'll normalize the data trimming extra whitespace and converting to all uppercase.
+Since the most obvious differences are whitespace and capitalization issues
+we'll normalize the data by trimming extra whitespace and converting labels for
+the events to uppercase.
 
 ```{r echo=TRUE,cache=TRUE}
 # Get a cleaner event type by trimming and uppercasing
@@ -115,7 +128,7 @@ uc_ev_sum <- uc_ev %>% group_by(EVTYPE) %>% summarise(count=n())
 ```
 
 This reduced the number of different events from `r dim(raw_ev)[1]` to
-`r dim(uc_ev_sum)[1]`.
+`r dim(uc_ev_sum)[1]` (a `r percent(1-dim(uc_ev_sum)[1]/dim(raw_ev)[1])`).
 
 Further manual adjustments were done by clustering similar events together by
 assigning the same name, we also delete rare and nonsense events.
@@ -186,100 +199,196 @@ translator <- function (df) {
   df %>% group_by(label) %>% summarise(n=sum(count)) %>% filter(n > 10) %>%
     inner_join(df,by = "label") %>% select(label, EVTYPE)
 }
+```
 
+The last transformation may be used to obtain a master translation table from
+EVTYPE to labels.
+
+```{r echo=TRUE}
 rosetta <- translator(uc_ev_sum)
 ```
 
-Manual adjustment reduced the number of different events from `r length(levels(rosetta$EVTYPE))`
-to `r length(levels(rosetta$label))`.
+```{r echo=FALSE}
+rosetta_labels <- length(levels(rosetta$label))
+```
 
-Then we compute a clean event dataset with unified lables and rare event types deleted.
+The translation table reduced the number of different events from
+`r dim(uc_ev_sum)[1]` to `r rosetta_labels`, reducing the number of labels to
+just the `r percent(rosetta_labels/dim(uc_ev_sum)[1])` of the normalized labels.
+
+Using the master conversion table we may compute a clean event dataset with
+unified lables and rare event types deleted.
 
 ```{r echo=TRUE}
 clean_data <- inner_join(rosetta, use_data, by="EVTYPE")
+```
+
+```{r echo=FALSE}
 deleted_records <- dim(use_data)[1] - dim(clean_data)[1]
 deleted_percent <- deleted_records / dim(use_data)[1]
 ```
 
-This deleted `r deleted_records` records which is only about `r sprintf("%.2f%%", deleted_percent*100)`
-of the total number of usable dataset records in the database.
+The event type cleanup was highly successful achieving to delete about
+`r percent(rosetta_labels/dim(raw_ev)[1])`
+of the original labels, by deleting most of the spurious labels, while preseving
+the `r percent(1-deleted_percent)` of the usable dataset.
+
+#### Exponent cleanup
 
 Property and crop damage are expresed as numbers with magnitude factors, this
 factors should be K, M, B standing for thousands, millions and billions
-respectively, but the file has errors shown in the following summary:
+respectively, but the file has errors.
 
+Property damages factors:
 ```{r echo=TRUE,results='asis'}
 t <- summary(as.factor(clean_data$PROPDMGEXP))
-knitr::kable(t, caption="Summary of exponents", format="markdown",
+knitr::kable(t, caption="Property damages factors", format="markdown",
              col.names=c("Count of Occurrences"))
 ```
 
-It will be assumed that missing factors account for K, that upper and lower case
-factors of the same letter have the same value and, that all extrange factor
-names (which are very rare) are thousands. The function used to do
-this conversion is shown below.
+There are a lot of missing factors, but most of them correspond to no damages as their cost is almost zero,
+except for very few samples.
 
 ```{r echo=TRUE}
-parse_exp <- function(v) {
-  parse_one <- function(e) {
-    if (is.na(e)) 1e3
-    else if (tolower(e) == "k") 1e3
-    else if (tolower(e) == "m") 1e6
-    else if (tolower(e) == "b") 1e9
-    else 1e3
-  }
-  sapply(v, parse_one)
-}
+summary(cbind("Property Summary"=clean_data$PROPDMG[is.na(clean_data$PROPDMGEXP)]))
 ```
+
+```{r echo=FALSE}
+prop_unknown = length(grep("[^KkMmBb]",clean_data$PROPDMGEXP))
+```
+
+Also there are only `r prop_unknown` (`r percent(prop_unknown/length(clean_data$PROPDMGEXP))`)
+unknown magnitudes for the property damages, so these samples can be safely
+ignored.
+
+Compute the cost vector for the property damages ignoring the cost for unknown 
+and unavailable samples.
+
+```{r echo=TRUE}
+compute_exp <- function(numbers, magnitudes, xfactor) {
+  get_factor <- function(magnitude) {
+    if (is.na(magnitude)) xfactor
+    else if (tolower(magnitude) == "k") 1e3
+    else if (tolower(magnitude) == "m") 1e6
+    else if (tolower(magnitude) == "b") 1e9
+    else xfactor
+  }
+  numbers * sapply(magnitudes, get_factor)
+}
+
+prop_cost <- compute_exp(clean_data$PROPDMG, clean_data$PROPDMGEXP, 0)
+```
+
+Crop damage factors:
+```{r echo=TRUE,results='asis'}
+t <- summary(as.factor(clean_data$CROPDMGEXP))
+knitr::kable(t, caption="Crop damages factors", format="markdown",
+             col.names=c("Count of Occurrences"))
+```
+
+There are a lot of missing factors, but most of them correspond to no damages as their cost is almost zero,
+except for very few samples.
+
+```{r echo=TRUE}
+summary(cbind("Crop Summary"=clean_data$CROPDMG[is.na(clean_data$CROPDMGEXP)]))
+```
+
+```{r echo=FALSE}
+crop_unknown = length(grep("[^KkMmBb]",clean_data$CROPDMGEXP))
+```
+
+Also there are only `r crop_unknown` (`r percent(crop_unknown/length(clean_data$CROPDMGEXP))`)
+unknown magnitudes for the crop damages, so these samples can be safely
+ignored.
+
+Compute the cost vector for the crop damages ignoring the cost for unknown 
+and unavailable samples.
+
+```{r echo=TRUE}
+crop_cost <- compute_exp(clean_data$CROPDMG, clean_data$CROPDMGEXP, 0)
+```
+
+
+#### Working dataset
 
 Then we compute the working dataset.
 
 ```{r echo=TRUE, cache=TRUE}
 data <- clean_data %>% 
   rename(fatalities=FATALITIES, injuries=INJURIES, evtype=label) %>%
-  mutate(propdmg = PROPDMG * parse_exp(PROPDMGEXP)) %>%
-  mutate(cropdmg = CROPDMG * parse_exp(CROPDMGEXP)) %>%
+  mutate(propdmg = prop_cost) %>%
+  mutate(cropdmg = crop_cost) %>%
   select(year, evtype, fatalities, injuries, propdmg, cropdmg)
-```
-
-Compute top causes of health and property damage.
-
-```{r echo=TRUE}
-sum_by_evType <- data %>% group_by(evtype) %>% 
-    summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(propdmg),crop=sum(cropdmg))
-
-top_num <- 20
-top_health <- sum_by_evType %>%  top_n(top_num,fatalities)
-top_econom <- sum_by_evType %>% top_n(top_num,property+crop)
-```
-
-```{r echo=TRUE}
-health_bars <- function () {
-  f <- top_health %>% select(evtype,fatalities,injuries)
-  f$evtype <- reorder(f$evtype, f$injuries+f$fatalities)
-  f <- melt(f,id.vars = "evtype")
-  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
-    coord_flip() + xlab('')+ ylab('Number of casualties') +
-    ggtitle("Top 20 Causes of health thread")  
-}
-
-econom_bars <- function () {
-  f <- top_econom %>% select(evtype,property,crop)
-  f$evtype <- reorder(f$evtype, f$property+f$crop)
-  f <- melt(f,id.vars = "evtype")
-  f$value <- f$value / 1e9
-  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
-    coord_flip() + xlab('')+ ylab('Looses in billions of USD') +
-    ggtitle("Top 20 Causes of economic damage")
-}
 ```
 
 
 ## Results
 
-Top threats
+```{r echo=FALSE}
+top_num <- 20
+```
+
+Compute top `r top_num` causes of health and property damage.
+
+```{r echo=TRUE}
+sum_by_evType <- data %>% group_by(evtype) %>% 
+    summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(propdmg),crop=sum(cropdmg))
+
+top_health <- sum_by_evType %>%  top_n(top_num,fatalities)
+top_econom <- sum_by_evType %>% top_n(top_num,property+crop)
+
+top_x_sum <- sum_by_evType %>% summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(property),crop=sum(crop))
+
+top_h_sum <- top_health %>%
+  summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(property),crop=sum(crop))
+top_h_pct <- top_h_sum / top_x_sum
+
+top_e_sum <- top_econom %>%
+  summarise(fatalities=sum(fatalities),injuries=sum(injuries),property=sum(property),crop=sum(crop))
+top_e_pct <- top_e_sum / top_x_sum
+
+num_years <- max(data$year) - min(data$year) + 1;
+top_h_yr <- top_h_sum / num_years
+top_e_yr <- top_e_sum / num_years
+```
+
+Top `r top_num` heath threats account for the `r percent(top_h_pct$fatalities)`
+of all the fatalities, and the `r percent(top_h_pct$injuries)`
+of all the injuries, causing the greatest impact in US population health with
+anual means of `r round(top_h_yr$fatalities,digits = 0)` fatalities and
+`r round(top_h_yr$injuries,digits = 0)` injuries.
+
+Top `r top_num` economic threats account for the `r percent(top_e_pct$property)`
+of all the property damages, and the `r percent(top_e_pct$crop)`
+of all the crop damages, causing the great majority of the economic threats to
+the US economy with anual property loses of `r round(top_e_yr$property/1e9,digits = 1)` billion
+and crop loses of `r round(top_e_yr$crop/1e9,digits = 1)` billion.
+
+The next chart shows the `r top_num` events that threaten the US public health 
+and economy ranked by its impact.
+
+```{r echo=TRUE}
+health_rank <- function () {
+  f <- top_health %>% select(evtype,fatalities,injuries)
+  f$evtype <- reorder(f$evtype, f$injuries+f$fatalities)
+  f <- melt(f,id.vars = "evtype")
+  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Number of casualties') +
+    ggtitle(sprintf("Top %d Causes of health thread", top_num))  
+}
+
+econom_rank <- function () {
+  f <- top_econom %>% select(evtype,property,crop)
+  f$evtype <- reorder(f$evtype, f$property+f$crop)
+  f <- melt(f,id.vars = "evtype")
+  f$value <- f$value / 1e9
+  ggplot(data=f, aes(evtype, value)) + geom_bar(stat="identity",aes(fill=variable)) +
+    coord_flip() + xlab('')+ ylab('Loses in billions of USD') +
+    ggtitle(sprintf("Top %d Causes of economic damage",top_num))
+}
+```
 
 ```{r echo=TRUE, fig.height=10, fig.width=8}
-grid.arrange(health_bars(), econom_bars(), ncol=1)
+grid.arrange(health_rank(), econom_rank(), ncol=1)
 ```
 
